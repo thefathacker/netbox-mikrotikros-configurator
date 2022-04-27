@@ -4,24 +4,23 @@ import ipaddress
 from librouteros import connect
 from librouteros.query import Key
 
-#{'value': 'virtual', 'display_name': 'Virtual'}
-#{'value': 'bridge', 'display_name': 'Bridge'}
-#{'value': 'lag', 'display_name': 'Link Aggregation Group (LAG)'}
-
-        #for type in self.nb.dcim.interfaces.choices()['type']:
-        #    print(type)
-        #for intf in api.path("/interface/ethernet"):
-        #    print(intf)
-
 class Keys:
     id = Key(".id")
     name = Key("name")
     mac = Key("mac-address")
     comment = Key("comment")
+    interface = Key("interface")
+    address = Key("address")
 
 class ROSDevice(threading.Thread):
-    
-    
+    def generateComment(self, intf):
+        desc = ""
+        if(intf.cable is not None):
+            desc = intf.connected_endpoint.device.name + " => " + intf.connected_endpoint.name
+        if(desc != "" and intf.description != ""): desc = desc + " - " + intf.description
+        elif(desc == "" and intf.description != ""): desc = intf.description
+        return desc
+
     def __init__(self, tid, dev, netbox):
         threading.Thread.__init__(self)
         self.threadID = tid
@@ -30,18 +29,46 @@ class ROSDevice(threading.Thread):
         self.nb = netbox
     def run(self):
         ip = self.dev.primary_ip.address.split("/")[0]
-        print(ip)
         api = connect(username="svc.netbox", password="Passw0rd", host=ip)
 
         for nbi in self.nb.dcim.interfaces.filter(device=self.dev):
             int_exists = 0
+            comment = self.generateComment(nbi)
             for rbi in api.path("/interface").select(Keys.id, Keys.name, Keys.mac, Keys.comment).where(Keys.mac == nbi["mac_address"]):
                 int_exists = int_exists + 1
             if(not int_exists):
-                print("Interface Doesn't Exist")
+                if(nbi["type"]["value"] in ["virtual", "bridge", "lag"]):
+                    api.path("/interface/bridge").add(**{"name":nbi["name"], "comment":comment})
+                    for rbi in api.path("/interface/bridge").select(Keys.id, Keys.name, Keys.mac, Keys.comment).where(Keys.name == nbi["name"]):
+                        nbi.mac_address = rbi["mac-address"]
+                        nbi.save()
             for rbi in api.path("/interface").select(Keys.id, Keys.name, Keys.mac, Keys.comment).where(Keys.mac == nbi["mac_address"]):
-                #print(rbi)
                 if("comment" not in rbi):
-                    if(nbi["description"] != ""): api.path("/interface").update(**{".id":rbi[".id"], "comment":nbi["description"]})
+                    if(comment != ""): api.path("/interface").update(**{".id":rbi[".id"], "comment":comment})
                 else:
-                    if(nbi["description"] != rbi["comment"]): api.path("/interface").update(**{".id":rbi[".id"], "comment":nbi["description"]})
+                    if(comment != rbi["comment"]): api.path("/interface").update(**{".id":rbi[".id"], "comment":comment})
+                if(nbi.name != rbi["name"]): api.path("/interface").update(**{".id":rbi[".id"], "name":nbi.name})
+            #for ip4 in api.path("/ip/address").select(Keys.id, Keys.address, Keys.interface).where(Keys.interface == nbi.name):
+            #    if(not len(self.nb.ipam.ip_addresses.filter(device=self.dev, address=ip4["address"]))):
+                    #api.path("/ip/address").remove(rbi[".id"])
+                    #rem_ip.append(rbi[".id"])
+            #        print(ip4)
+            for ip in self.nb.ipam.ip_addresses.filter(device=self.dev, assigned_object_type="dcim.interface"):
+                if(ip.assigned_object_id != nbi.id): continue
+                if(ip.family.value == 4):
+                    count = 0
+                    for rip in api.path("/ip/address").select(Keys.id, Keys.address, Keys.interface).where(Keys.address == ip.address):
+                        if(rip['interface'] != nbi.name): api.path("/ip/address").update(**{".id":rip[".id"], "interface":nbi.name})
+                        count = count + 1
+                    if(not count): api.path("/ip/address").add(interface=nbi.name, address=ip.address)
+                if(ip.family.value == 6):
+                    count = 0
+                    for rip in api.path("/ipv6/address").select(Keys.id, Keys.address, Keys.interface).where(Keys.address == ip.address):
+                        if(rip['interface'] != nbi.name): api.path("/ipv6/address").update(**{".id":rip[".id"], "interface":nbi.name})
+                        count = count + 1
+                    if(not count): api.path("/ipv6/address").add(interface=nbi.name, address=ip.address)
+            #ip_count = 0
+            #for ip in api.path("/ip/address").select(Keys.id, Keys.address, Keys.interface).where(Keys.interface == nbi.name):
+            #    ip_count = ip_count + 1
+            #for ip4 in api.path("/ip/address").select(Keys.id, Keys.address, Keys.interface).where(Keys.interface == nbi.name):
+                #if(not len(self.nb.ipam.ip_addresses.filter(device=self.dev, address=ip4["address"]))):
