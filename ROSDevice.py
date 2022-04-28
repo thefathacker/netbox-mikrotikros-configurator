@@ -28,8 +28,8 @@ class ROSDevice(threading.Thread):
         self.dev = dev
         self.nb = netbox
     def run(self):
-        ip = self.dev.primary_ip.address.split("/")[0]
-        api = connect(username="svc.netbox", password="Passw0rd", host=ip)
+        api_ip = self.dev.primary_ip.address.split("/")[0]
+        api = connect(username="svc.netbox", password="Passw0rd", host=api_ip)
 
         for nbi in self.nb.dcim.interfaces.filter(device=self.dev):
             int_exists = 0
@@ -48,11 +48,6 @@ class ROSDevice(threading.Thread):
                 else:
                     if(comment != rbi["comment"]): api.path("/interface").update(**{".id":rbi[".id"], "comment":comment})
                 if(nbi.name != rbi["name"]): api.path("/interface").update(**{".id":rbi[".id"], "name":nbi.name})
-            #for ip4 in api.path("/ip/address").select(Keys.id, Keys.address, Keys.interface).where(Keys.interface == nbi.name):
-            #    if(not len(self.nb.ipam.ip_addresses.filter(device=self.dev, address=ip4["address"]))):
-                    #api.path("/ip/address").remove(rbi[".id"])
-                    #rem_ip.append(rbi[".id"])
-            #        print(ip4)
             for ip in self.nb.ipam.ip_addresses.filter(device=self.dev, assigned_object_type="dcim.interface"):
                 if(ip.assigned_object_id != nbi.id): continue
                 if(ip.family.value == 4):
@@ -67,8 +62,9 @@ class ROSDevice(threading.Thread):
                         if(rip['interface'] != nbi.name): api.path("/ipv6/address").update(**{".id":rip[".id"], "interface":nbi.name})
                         count = count + 1
                     if(not count): api.path("/ipv6/address").add(interface=nbi.name, address=ip.address)
-            #ip_count = 0
-            #for ip in api.path("/ip/address").select(Keys.id, Keys.address, Keys.interface).where(Keys.interface == nbi.name):
-            #    ip_count = ip_count + 1
-            #for ip4 in api.path("/ip/address").select(Keys.id, Keys.address, Keys.interface).where(Keys.interface == nbi.name):
-                #if(not len(self.nb.ipam.ip_addresses.filter(device=self.dev, address=ip4["address"]))):
+            for rip in api.path("/ip/address").select(Keys.id, Keys.address, Keys.interface).where(Keys.interface == nbi.name):
+                if(not len(self.nb.ipam.ip_addresses.filter(device=self.dev, address=rip["address"]))):
+                    api.path("/ip/address").remove(rip[".id"])
+            for rip in api.path("/ipv6/address").select(Keys.id, Keys.address, Keys.interface).where(Keys.interface == nbi.name):
+                if(not len(self.nb.ipam.ip_addresses.filter(device=self.dev, address=rip["address"]))):
+                    if("fe80::" not in rip["address"]): api.path("/ipv6/address").remove(rip[".id"])
