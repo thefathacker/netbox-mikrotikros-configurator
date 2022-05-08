@@ -2,37 +2,23 @@ import json
 import threading
 import types
 import ipaddress
+from ROS.Keys import Keys
 from librouteros import connect
-from librouteros.query import Key
-
-class Keys:
-    id = Key(".id")
-    rid = Key("id")
-    name = Key("name")
-    mac = Key("mac-address")
-    comment = Key("comment")
-    interface = Key("interface")
-    interfaces = Key("interfaces")
-    address = Key("address")
-    inactive = Key("inactive")
-    area = Key("area")
-    type = Key("type")
-    passive = Key("passive")
 
 class ROSDevice(threading.Thread):
-    def getNBTags(self):
-        tags = types.SimpleNamespace()
-        for tag in self.nb.extras.tags.all():
-            if(tag.name == "ospf-ptp"): tags.ospf_ptp = tag
-            if(tag.name == "ospf-passive"): tags.ospf_passive = tag
-        return tags
-    def generateComment(self, intf):
+    def generateInterfaceComment(self, intf):
         desc = ""
         if(intf.cable is not None):
             desc = intf.connected_endpoint.device.name + " => " + intf.connected_endpoint.name
         if(desc != "" and intf.description != ""): desc = desc + " - " + intf.description
         elif(desc == "" and intf.description != ""): desc = intf.description
         return desc
+    def getNBTags(self):
+        tags = types.SimpleNamespace()
+        for tag in self.nb.extras.tags.all():
+            if(tag.name == "ospf-ptp"): tags.ospf_ptp = tag
+            if(tag.name == "ospf-passive"): tags.ospf_passive = tag
+        return tags
     def reviewRouterID(self,api,api_ip):
         rid_found = False
         for rid in api.path("/routing/id"):
@@ -89,37 +75,98 @@ class ROSDevice(threading.Thread):
     def __init__(self, tid, dev, netbox):
         threading.Thread.__init__(self)
         self.threadID = tid
-        self.name = dev.name
         self.dev = dev
         self.nb = netbox
         self.tags = self.getNBTags()
     def run(self):
-        api_ip = self.dev.primary_ip.address.split("/")[0]
+        api_ip = self.dev.primary_ip4.address.split("/")[0]
         api = connect(username="svc.netbox", password="Passw0rd", host=api_ip)
-
-        self.reviewRouterID(api, api_ip)
-        for ver in [2,3]:
-            self.reviewOSPFInst(ver, api)
-            self.reviewOSPFArea(ver, api)
         
-        for nbi in self.nb.dcim.interfaces.filter(device=self.dev):
-            int_exists = 0
-            comment = self.generateComment(nbi)
-            for rbi in api.path("/interface").select(Keys.id, Keys.name, Keys.mac, Keys.comment).where(Keys.mac == nbi["mac_address"]):
-                int_exists = int_exists + 1
-            if(not int_exists):
-                if(nbi["type"]["value"] in ["virtual", "bridge", "lag"]):
-                    api.path("/interface/bridge").add(**{"name":nbi["name"], "comment":comment})
-                    for rbi in api.path("/interface/bridge").select(Keys.id, Keys.name, Keys.mac, Keys.comment).where(Keys.name == nbi["name"]):
-                        nbi.mac_address = rbi["mac-address"]
-                        nbi.save()
-            for rbi in api.path("/interface").select(Keys.id, Keys.name, Keys.mac, Keys.comment).where(Keys.mac == nbi["mac_address"]):
-                if("comment" not in rbi):
-                    if(comment != ""): api.path("/interface").update(**{".id":rbi[".id"], "comment":comment})
+        # Write Bridges to Device
+        for nbi in self.nb.dcim.interfaces.filter(device=self.dev, type="bridge"):
+            exists = False
+            comment = self.generateInterfaceComment(nbi)
+            for rbi in api.path("/interface/bridge").select(Keys.id, Keys.name, Keys.mac, Keys.comment).where(Keys.name == nbi.name):
+                if(rbi["mac-address"] != nbi.mac_address):
+                    nbi.mac_address = rbi["mac-address"]
+                    nbi.save()
+                if(comment in rbi):
+                    if(rbi["comment"] != comment): api.path("/interface").update(**{".id":rbi[".id"], "comment":comment})
                 else:
-                    if(comment != rbi["comment"]): api.path("/interface").update(**{".id":rbi[".id"], "comment":comment})
-                if(nbi.name != rbi["name"]): api.path("/interface").update(**{".id":rbi[".id"], "name":nbi.name})
-            for ip in self.nb.ipam.ip_addresses.filter(device=self.dev, assigned_object_type="dcim.interface"):
+                    if(comment != ""): api.path("/interface").update(**{".id":rbi[".id"], "comment":comment})
+                exists = True
+            if(not exists):
+                nid = api.path("/interface/bridge").add(**{"name":nbi.name, "comment":comment})
+                for trbi in api.path("/interface/bridge").select(Keys.id, Keys.name, Keys.mac, Keys.comment).where(Keys.id == nid):
+                    nbi.mac_address = trbi["mac-address"]
+                    nbi.save()
+        # Review Bridges on Device
+        for rbi in api.path("/interface/bridge").select(Keys.id, Keys.name, Keys.mac, Keys.comment):
+            exists = False
+            for nbi in self.nb.dcim.interfaces.filter(device=self.dev, type="bridge", name=rbi["name"]):
+                if(nbi.name == rbi["name"]): exists = True
+            if(not exists): api.path("/interface/bridge").remove(rbi[".id"])
+        # Write LAGs to Device
+        for nbi in self.nb.dcim.interfaces.filter(device=self.dev, type="lag"):
+            print("NEED TO SETUP LAGG") #SETUP LATER
+        # Review Ethernet Interfaces
+        for nbi in self.nb.dcim.interfaces.filter(device=self.dev):
+            if(nbi.type.value not in ["virtual","bridge","lag"]):
+                comment = self.generateInterfaceComment(nbi)
+                for rbi in api.path("/interface/ethernet").select(Keys.id, Keys.name, Keys.mac, Keys.comment).where(Keys.mac == nbi.mac_address):
+                    if("comment" not in rbi):
+                        if(comment != ""): api.path("/interface/ethernet").update(**{".id":rbi[".id"], "comment":comment})
+                    else:
+                        if(comment != rbi["comment"]): api.path("/interface/ethernet").update(**{".id":rbi[".id"], "comment":comment})
+                    if(nbi.name != rbi["name"]): api.path("/interface/ethernet").update(**{".id":rbi[".id"], "name":nbi.name})
+                #print() #SETUP LATER
+        
+        # Write FHRP
+        for nbi in self.nb.dcim.interfaces.filter(device=self.dev):
+            vrrp4_exists = False
+            vrrp6_exists = False
+            for rbi in api.path("/interface/vrrp").select(Keys.id, Keys.name, Keys.mac, Keys.comment).where(Keys.name == (nbi.name + ".vrrp4")):
+                vrrp4_exists = True
+            for rbi in api.path("/interface/vrrp").select(Keys.id, Keys.name, Keys.mac, Keys.comment).where(Keys.name == (nbi.name + ".vrrp6")):
+                vrrp6_exists = True
+            ##### NEED TO WORK OUT HOW TO QUERY PRIORITY
+            if(nbi.count_fhrp_groups):
+                if(not vrrp4_exists):
+                    api.path("/interface/vrrp").add(**{"name":(nbi.name + ".vrrp4"), "vrid":4, "interface":nbi.name, "version":3, "v3-protocol":"ipv4"})
+                if(not vrrp6_exists):
+                    api.path("/interface/vrrp").add(**{"name":(nbi.name + ".vrrp6"), "vrid":6, "interface":nbi.name, "version":3, "v3-protocol":"ipv6"})
+            else:
+                if(vrrp4_exists):
+                    for rbi in api.path("/interface/vrrp").select(Keys.id, Keys.name, Keys.mac, Keys.comment).where(Keys.name == (nbi.name + ".vrrp4")):
+                        api.path("/interface/vrrp").remove(rbi[".id"])
+                if(vrrp6_exists):
+                    for rbi in api.path("/interface/vrrp").select(Keys.id, Keys.name, Keys.mac, Keys.comment).where(Keys.name == (nbi.name + ".vrrp6")):
+                        api.path("/interface/vrrp").remove(rbi[".id"])
+        
+        # Write VLANs to Device
+        for nbi in self.nb.dcim.interfaces.filter(device=self.dev, type="virtual"):
+            exists = False
+            vid = 0
+            if(nbi.untagged_vlan is not None):
+                vid = nbi.untagged_vlan.vid
+            if(nbi.parent is not None):
+                if(nbi.mac_address != nbi.parent.mac_address):
+                    nbi.mac_address = nbi.parent.mac_address
+                    nbi.save()
+                for rbi in api.path("/interface/vlan").select(Keys.id, Keys.name, Keys.mac, Keys.comment, Keys.vid).where(Keys.mac == nbi.mac_address, Keys.name == nbi.name):
+                    exists = True
+                    if(rbi["vlan-id"] != vid and vid): api.path("/interface/vlan").update(**{".id":rbi[".id"], "vlan-id":vid})
+            if(not exists and vid and nbi.parent is not None):
+                api.path("/interface/vlan").add(**{"name":nbi.name, "interface":nbi.parent.name, "vlan-id":vid})
+        # Review VLANs on Device
+        for rbi in api.path("/interface/vlan").select(Keys.id, Keys.name, Keys.mac, Keys.comment, Keys.vid):
+            exists = False
+            for nbi in self.nb.dcim.interfaces.filter(device=self.dev, type="virtual", name=rbi["name"]):
+                if(nbi.name == rbi["name"]): exists = True
+            if(not exists): api.path("/interface/vlan").remove(rbi[".id"])
+        # IP Configuration
+        for nbi in self.nb.dcim.interfaces.filter(device=self.dev):
+            for ip in self.nb.ipam.ip_addresses.filter(device=self.dev):
                 if(ip.assigned_object_id != nbi.id): continue
                 if(ip.family.value == 4):
                     count = 0
@@ -133,11 +180,15 @@ class ROSDevice(threading.Thread):
                         if(rip['interface'] != nbi.name): api.path("/ipv6/address").update(**{".id":rip[".id"], "interface":nbi.name})
                         count = count + 1
                     if(not count): api.path("/ipv6/address").add(interface=nbi.name, address=ip.address)
-            for rip in api.path("/ip/address").select(Keys.id, Keys.address, Keys.interface).where(Keys.interface == nbi.name):
-                if(not len(self.nb.ipam.ip_addresses.filter(device=self.dev, address=rip["address"]))):
-                    api.path("/ip/address").remove(rip[".id"])
-            for rip in api.path("/ipv6/address").select(Keys.id, Keys.address, Keys.interface).where(Keys.interface == nbi.name):
-                if(not len(self.nb.ipam.ip_addresses.filter(device=self.dev, address=rip["address"]))):
-                    if("fe80::" not in rip["address"]): api.path("/ipv6/address").remove(rip[".id"])
-            self.reviewOSPFInterface(nbi, api)
-            
+        for rip in api.path("/ip/address").select(Keys.id, Keys.address, Keys.interface).where(Keys.interface == nbi.name):
+            if(not len(self.nb.ipam.ip_addresses.filter(device=self.dev, address=rip["address"]))):
+                api.path("/ip/address").remove(rip[".id"])
+        for rip in api.path("/ipv6/address").select(Keys.id, Keys.address, Keys.interface).where(Keys.interface == nbi.name):
+            if(not len(self.nb.ipam.ip_addresses.filter(device=self.dev, address=rip["address"]))):
+                if("fe80::" not in rip["address"]): api.path("/ipv6/address").remove(rip[".id"])
+        # OSPF Configuration
+        self.reviewRouterID(api, api_ip)
+        for ver in [2,3]:
+            self.reviewOSPFInst(ver, api)
+            self.reviewOSPFArea(ver, api)
+        self.reviewOSPFInterface(nbi, api)
