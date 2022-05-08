@@ -191,4 +191,5 @@ class ROSDevice(threading.Thread):
         for ver in [2,3]:
             self.reviewOSPFInst(ver, api)
             self.reviewOSPFArea(ver, api)
-        self.reviewOSPFInterface(nbi, api)
+        for nbi in self.nb.dcim.interfaces.filter(device=self.dev):
+            self.reviewOSPFInterface(nbi, api)
